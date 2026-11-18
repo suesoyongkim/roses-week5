@@ -401,8 +401,8 @@
     let photoDetailOpen=false,photoDetailFocusReturn=null,photoDetailHideTimer=null;
     function openPhotoDetail(item){
       if(!entered || creditsOpen || photoDetailOpen)return;
-      // Enlargement does not pause the moving collage behind the photograph.
-      autoScrollResumeAt=0;
+      // Freeze the collage immediately while the enlarged photo is visible.
+      holdGalleryStill();
       if(photoDetailHideTimer!==null){clearTimeout(photoDetailHideTimer);photoDetailHideTimer=null;}
       photoDetailFocusReturn=visible.get(item.id) || null;
       clearHoverPhoto();
@@ -419,8 +419,8 @@
     }
     function closePhotoDetail(){
       if(!photoDetailOpen)return;
-      // Keep the ambient camera moving seamlessly after the detail closes.
-      autoScrollResumeAt=0;
+      // Resume 0.5s after the enlarged photo's fade-out has finished.
+      scheduleGalleryResume(prefersLessMotion ? 0 : 235);
       photoDetailOpen=false;
       photoDetailOverlay.classList.remove('is-open');
       photoDetailOverlay.setAttribute('aria-hidden','true');
@@ -443,8 +443,8 @@
     let creditsOpen=false,creditsHideTimer=null;
     function openCredits(){
       if(!entered||creditsOpen)return;
-      // Credits are a visual overlay only: keep the collage travelling underneath.
-      autoScrollResumeAt=0;
+      // Freeze the collage immediately while credits are visible.
+      holdGalleryStill();
       if(creditsHideTimer!==null){clearTimeout(creditsHideTimer);creditsHideTimer=null;}
       creditsOpen=true;heldArrows.clear();
       viewport.inert=true;
@@ -454,8 +454,8 @@
     }
     function closeCredits(){
       if(!creditsOpen)return;
-      // Closing credits must not create an extra idle delay or reset the camera.
-      autoScrollResumeAt=0;
+      // Resume 0.5s after the credits fade-out has finished.
+      scheduleGalleryResume(prefersLessMotion ? 0 : 380);
       creditsOpen=false;creditsOverlay.classList.remove('is-open');
       creditsOverlay.setAttribute('aria-hidden','true');
       moreButton.setAttribute('aria-expanded','false');
@@ -585,10 +585,22 @@
     // Quiet ambient movement: travel right through new mosaic strips when idle.
     // Manual exploration takes priority; movement resumes after a short pause.
     const AUTO_SCROLL_PX_PER_SECOND = 30;
+    const AUTO_SCROLL_MOBILE_PX_PER_SECOND = 22;
     const AUTO_SCROLL_IDLE_MS = 2200;
     let autoScrollResumeAt = 0;
     function pauseAutoScroll(delay=AUTO_SCROLL_IDLE_MS){
       autoScrollResumeAt=performance.now()+delay;
+    }
+    const OVERLAY_RESUME_DELAY_MS=500;
+    function holdGalleryStill(){
+      // Stop both the automatic drift and any remaining scroll interpolation.
+      target=camera;
+      autoScrollResumeAt=Infinity;
+      if(wheelSettleTimer!==null){clearTimeout(wheelSettleTimer);wheelSettleTimer=null;}
+    }
+    function scheduleGalleryResume(fadeOutMs=0){
+      target=camera;
+      autoScrollResumeAt=performance.now()+fadeOutMs+OVERLAY_RESUME_DELAY_MS;
     }
     let brokenImages=0,loadedImages=0;
     // A missing or unplayable file should not leave a visible empty tile.
@@ -1322,11 +1334,12 @@
     function tick(t) {
       const frameMs=previousTime?Math.max(0,Math.min(100,t-previousTime)):16.67;
       const dt=Math.min(3,frameMs/16.67)||1;previousTime=t;
-      // The camera always advances between interactions. Hover, clicks and
-      // wheel movement never introduce a dead stop; dragging temporarily owns it.
+      // Pause the camera under photo and credits overlays, then resume after
+      // their fade-out and a half-second viewing pause.
       if(entered && !motionPreference.matches && t>=autoScrollResumeAt &&
+         !photoDetailOpen && !creditsOpen &&
          !pressed?.drag && heldArrows.size===0 && !document.hidden){
-        move(AUTO_SCROLL_PX_PER_SECOND*frameMs/1000);
+        move((mobileVertical()?AUTO_SCROLL_MOBILE_PX_PER_SECOND:AUTO_SCROLL_PX_PER_SECOND)*frameMs/1000);
       }
       camera+=(target-camera)*(1-Math.pow(.83,dt));
       // Arrow keys move smoothly while held.
