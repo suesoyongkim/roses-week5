@@ -83,9 +83,11 @@
     .experience.visible .instructions,
     .experience.visible .social-links { opacity:1;visibility:visible }
     .viewport { position:absolute;inset:0;overflow:hidden;cursor:default;
-      touch-action:none;user-select:none;-webkit-user-select:none }
+      touch-action:pinch-zoom;user-select:none;-webkit-user-select:none }
     .viewport.dragging { cursor:grabbing }
-    .stage { position:absolute;inset:0;z-index:1;overflow:hidden;pointer-events:none }
+    /* The stage moves as a single compositor layer; tile geometry stays stable. */
+    .stage { position:absolute;inset:0;z-index:1;overflow:visible;pointer-events:none;
+      will-change:transform;contain:layout style }
     .cursor-circle {
       position:fixed;left:0;top:0;z-index:9000;
       width:10px;height:10px;border:1.5px solid #fff;border-radius:50%;
@@ -267,13 +269,15 @@
     /* Interviews stay in place: hovering changes the audio, not the collage geometry. */
     .tile.interview { cursor:default }
     .tile.interview video { background:#111;object-fit:fill }
-    .tile.interview:focus-visible { outline:2px solid #111;outline-offset:3px }
-    .instructions { position:absolute;z-index:4000;bottom:clamp(18px,3vw,40px);
-      left:clamp(18px,3vw,40px);pointer-events:none;
+    .tile.interview:focus-visible { outline:2px solid #fff;outline-offset:4px }
+    .instructions { position:absolute;z-index:4000;
+      bottom:calc(clamp(18px,3vw,40px) + env(safe-area-inset-bottom,0px));
+      left:calc(clamp(18px,3vw,40px) + env(safe-area-inset-left,0px));pointer-events:none;
       font-size:10px;letter-spacing:.18em;color:#fff;mix-blend-mode:difference }
     /* Social profiles use standalone logos; MORE is unboxed underlined text. */
     .social-links { position:absolute;z-index:2001;
-      right:clamp(18px,3vw,40px);bottom:calc(clamp(18px,3vw,40px) - 12px);
+      right:calc(clamp(18px,3vw,40px) + env(safe-area-inset-right,0px));
+      bottom:calc(clamp(18px,3vw,40px) - 12px + env(safe-area-inset-bottom,0px));
       display:flex;align-items:center;gap:8px }
     .social-link { display:grid;place-items:center;width:38px;height:36px;
       padding:0;border:0;background:none;color:#fff;text-decoration:none;
@@ -344,7 +348,7 @@
     <div class="viewport" id="viewport" tabindex="0" aria-label="Horizontal infinite gallery. Scroll, drag, or press the left and right arrow keys to explore">
       <div class="stage" id="stage"></div>
     </div>
-    <div class="instructions">SCROLL / DRAG / ← → TO EXPLORE</div>
+    <div class="instructions"><span class="desktop-instructions">SCROLL / DRAG / ← → TO EXPLORE</span><span class="touch-instructions" hidden>SWIPE TO EXPLORE</span></div>
     <nav class="social-links" aria-label="Dan Relief social profiles">
       <a class="social-link" href="https://www.instagram.com/danrelief/"
          target="_blank" rel="noopener noreferrer" aria-label="Instagram" title="Instagram">
@@ -481,8 +485,13 @@
     creditsOverlay.addEventListener('keydown',e=>{
       if(e.key==='Tab'){e.preventDefault();creditsOverlay.focus({preventScroll:true});}
     });
-    const prefersLessMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');
+    const prefersLessMotion=motionPreference.matches;
     const canHover = matchMedia('(hover: hover) and (pointer: fine)').matches;
+    if(!canHover){
+      document.querySelector('.desktop-instructions').hidden=true;
+      document.querySelector('.touch-instructions').hidden=false;
+    }
     // Use the white circle alone, precisely centered on the actual pointer.
     // ROSES intro is cursor-free (including its release transition).
     const cursorCircle=get('cursorCircle');
@@ -506,7 +515,10 @@
       });
     }
     const MUSIC_VOLUME = 0.85;
-    const DUCKED_VOLUME = 0.08; // Roses stays quietly underneath an interview.
+    const DUCKED_VOLUME = 0.08;
+    // iOS Safari does not implement settable HTMLMediaElement.volume reliably.
+    const iOSAudio=/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
     const INTERVIEW_VOLUME = 1;
 
     const custom = window.ROSES_MEDIA || {};
@@ -514,6 +526,11 @@
       ? custom.images : Array.from({length:120},(_,i)=>`Frame-${i+1}.jpeg`);
     const interviews = Array.isArray(custom.videos) && custom.videos.length
       ? custom.videos : Array.from({length:13},(_,i)=>`interview${i+1}.mp4`);
+    // Optional pre-exported still frames. Example ROSES_MEDIA.videoPosters =
+    // {'interview1.mp4':'interview1.webp'} in assets/manifest.js.
+    // No extra poster requests are made unless filenames are supplied.
+    const videoPosters = custom.videoPosters && typeof custom.videoPosters==='object'
+      ? custom.videoPosters : {};
     const assetPath = (folder,name) => (/^(https?:|data:|\/)/i.test(name) || name.startsWith('assets/'))
       ? name : `assets/${folder}/${name.split('/').map(encodeURIComponent).join('/')}`;
 
@@ -568,7 +585,8 @@
       try {
         rhizoma=window.SGRhizoma.grow(title, {
           face:'roses',seed:202,field:true,fixed:true,size:.36,
-          climb:20,seconds:58,colour:'#ffffff',weight:'earthy',dpr:2
+          climb:20,seconds:58,colour:'#ffffff',weight:'earthy',
+          dpr:innerWidth<=760?1:Math.min(1.5,devicePixelRatio||1)
         });
       } catch(err) {
         rhizomaStarted=false;
@@ -612,10 +630,23 @@
     // A missing or unplayable file should not leave a visible empty tile.
     // Remove it from the source list and repack the mosaic with valid media.
     const missingSources=new Set();
+    const hasUsablePhotos=()=>media.some(item=>item.type==='image' && !missingSources.has(item.src));
+    function showNoPhotoWarning(){
+      clearTimeout(backgroundRelayoutTimer);
+      stopPreview();
+      visible.forEach(tile=>tile.remove());visible.clear();
+      strips.clear();stackOrder=[];
+      assetWarning.innerHTML='No photographs were found. Check <code>assets/images/Frame-1.jpeg</code> and your <code>assets/manifest.js</code> paths.';
+      assetWarning.hidden=false;
+    }
     function removeMissingMedia(source){
       const src=typeof source==='string' ? source : source.src;
       if(missingSources.has(src))return;
       missingSources.add(src);
+      if(!hasUsablePhotos()){
+        showNoPhotoWarning();
+        return;
+      }
       for(const [id,tile] of visible){
         if(tile.dataset.source!==src)continue;
         if(tile===activePreview)stopPreview(tile);
@@ -831,18 +862,19 @@
       return strips.get(position<0?minStrip:maxStrip) || null;
     }
     function ensureStrips(from,to){
+      if(!hasUsablePhotos())return;
       if(!strips.size){
         const initial=buildStrip(0);
         strips.set(0,initial);minStrip=0;maxStrip=0;
       }
-      let last=strips.get(maxStrip);
-      while(last.start+last.width<to){
+      let last=strips.get(maxStrip),built=0;
+      while(last.start+last.width<to && built++<16){
         const next=buildStrip(maxStrip+1);
         next.start=last.start+last.width;
         strips.set(next.index,next);maxStrip=next.index;last=next;
       }
-      let first=strips.get(minStrip);
-      while(first.start>from){
+      let first=strips.get(minStrip);built=0;
+      while(first.start>from && built++<16){
         const previous=buildStrip(minStrip-1);
         previous.start=first.start-previous.width;
         strips.set(previous.index,previous);minStrip=previous.index;first=previous;
@@ -856,6 +888,7 @@
       }
     }
     function layout(){
+      if(!hasUsablePhotos()){showNoPhotoWarning();return;}
       // Preserve the current strip and the viewer's position within it on
       // resize, initial photo-dimension discovery, or removal of broken media.
       const previous=findCurrentStrip(camera);
@@ -866,7 +899,10 @@
       anchor.start=camera-fraction*anchor.width;
       strips=new Map([[anchorIndex,anchor]]);
       minStrip=anchorIndex;maxStrip=anchorIndex;
-      // The old DOM is removed; click order is retained for the nearby strips.
+      // Relayout can destroy the playing interview. Restore soundtrack first.
+      stopPreview();
+      if([...visible.values()].some(el=>el===document.activeElement))
+        viewport.focus({preventScroll:true});
       visible.forEach(el=>el.remove());visible.clear();
       placeVisible();
       if(!entered)preloadFirstScreen();
@@ -881,7 +917,7 @@
         backgroundRelayoutTimer=null;
         // Keep the visitor in the same strip, even after photos are repacked.
         layout();
-      },180);
+      },420);
     }
     function ensureBackgroundRatio(src){
       if(missingSources.has(src)||mediaRatios.has(src)||pendingBackgroundRatios.has(src))return;
@@ -924,7 +960,10 @@
         img.src=item.src;
       }
     }
+    let lastPlacementCamera=NaN;
     function placeVisible() {
+      lastPlacementCamera=camera;
+      if(!hasUsablePhotos()){showNoPhotoWarning();return;}
       // No modulo/wrap: new seeded mosaics are created beyond both ends.
       // Each strip is stable when returning to an earlier section.
       const buffer=Math.min(520,innerWidth*.46);
@@ -936,9 +975,10 @@
         if(!strip.items)strip.items=buildStrip(strip.index).items;
         for(const item of strip.items){
           if(missingSources.has(item.src))continue;
-          const left=strip.start+item.x-camera;
-          if(left+item.width< -buffer || left>innerWidth+buffer)continue;
-          nearby.push({item,left});
+          const worldLeft=strip.start+item.x;
+          const viewLeft=worldLeft-camera;
+          if(viewLeft+item.width< -buffer || viewLeft>innerWidth+buffer)continue;
+          nearby.push({item,left:worldLeft});
         }
       }
       // New segments join the common stacking order without disrupting clicks.
@@ -948,6 +988,7 @@
       const previouslyStacked=new Set(stackOrder);
       stackOrder=[...nearbyByLayer.filter(id=>!previouslyStacked.has(id)),
                   ...stackOrder.filter(id=>availableIds.has(id))];
+      const zOrder=new Map(stackOrder.map((id,index)=>[id,index+1]));
       for(const {item,left} of nearby){
         keep.add(item.id);
         let el=visible.get(item.id);
@@ -974,7 +1015,10 @@
         el.style.top=centerY+'px';
         el.style.width=displayWidth+'px';
         el.style.height=displayHeight+'px';
-        el.style.zIndex=String(stackOrder.indexOf(item.id)+1);
+        el.style.zIndex=String(zOrder.get(item.id)||1);
+        el._rosesBounds={left:left+(item.width-displayWidth)/2,
+          right:left+(item.width-displayWidth)/2+displayWidth,
+          top:centerY-displayHeight/2,bottom:centerY+displayHeight/2};
         if(item.type==='image'){
           // Keep the same original two-second deadline across layout rebuilds.
           const burst=photoFilterStates.get(item.id);
@@ -992,10 +1036,41 @@
       for(const [id,el] of visible){
         if(keep.has(id))continue;
         if(el===activePreview)stopPreview();
+        if(el===document.activeElement)viewport.focus({preventScroll:true});
         // Filter state belongs to the photo ID, not to the transient DOM node.
         // Removing an offscreen tile must never restart its countdown.
         el.remove();visible.delete(id);
       }
+      // Video bytes are not requested for all 13 interviews (and their copies)
+      // at once. Warm only a few tiles around the current viewport. If a
+      // poster exists it appears immediately, independently of MP4 loading.
+      warmVisibleVideos();
+    }
+    function ensureVideoSource(video,forPlayback=false){
+      if(!video)return;
+      if(forPlayback)video.preload='auto';
+      else video.preload='metadata';
+      if(!video.hasAttribute('src')){
+        video.src=video.dataset.src;
+        if(!forPlayback)video.load();
+      }
+    }
+    function warmVisibleVideos(){
+      const margin=Math.min(260,innerWidth*.25);
+      const candidates=[];
+      for(const el of visible.values()){
+        if(!el.classList.contains('interview'))continue;
+        const b=el._rosesBounds;
+        if(!b || b.right<camera-margin || b.left>camera+innerWidth+margin)continue;
+        const video=el.querySelector('video');
+        if(!video || video.hasAttribute('src'))continue;
+        const middle=(b.left+b.right)/2;
+        const distance=Math.abs(middle-(camera+innerWidth*.5));
+        candidates.push({video,distance});
+      }
+      candidates.sort((a,b)=>a.distance-b.distance);
+      // Keep background prefetch modest. Any hovered video jumps this queue.
+      for(const {video} of candidates.slice(0,5))ensureVideoSource(video);
     }
     // Every photo has its OWN four-second hover timer. A neighbouring photo's
     // hover or a rebuilt mosaic must not cancel or restart the first photo's FX.
@@ -1064,12 +1139,13 @@
     function highlightTouchPhoto(x,y){
       if(canHover||!entered||creditsOpen||photoDetailOpen)return;
       let best=null,bestD=Infinity;
+      const worldX=x+camera;
       for(const el of visible.values()){
         if(!el.classList.contains('photo'))continue;
-        const rect=el.getBoundingClientRect();
-        if(rect.right<0||rect.left>innerWidth||rect.bottom<0||rect.top>innerHeight)continue;
-        const dx=Math.max(rect.left-x,0,x-rect.right);
-        const dy=Math.max(rect.top-y,0,y-rect.bottom);
+        const r=el._rosesBounds;
+        if(!r || r.right<camera || r.left>camera+innerWidth || r.bottom<0 || r.top>innerHeight)continue;
+        const dx=Math.max(r.left-worldX,0,worldX-r.right);
+        const dy=Math.max(r.top-y,0,y-r.bottom);
         const d=dx*dx+dy*dy;
         if(d<bestD){best=el;bestD=d;}
       }
@@ -1082,7 +1158,10 @@
       if(!entered||creditsOpen||photoDetailOpen||pressed?.drag||
          performance.now()-draggedRecently<330)return;
       if(item.type==='image')openPhotoDetail(item);
-      // Interview clips play on hover/focus/touch as before.
+      else {
+        const tile=visible.get(item.id);
+        if(tile){if(activePreview===tile)stopPreview(tile);else startPreview(tile);}
+      }
     }
     function bringTileToFront(item){
       if(!entered||creditsOpen||photoDetailOpen)return;
@@ -1100,19 +1179,24 @@
       tile.className='tile '+(item.type==='video'?'interview':'photo');
       if(item.type==='image' && item.layer<=2)tile.classList.add('base-photo');
       if(item.type==='image')tile.dataset.filter=String(filterForSource(item.src));
-      if(item.type==='image')tile.tabIndex=0;
-      if(item.type==='video') tile.tabIndex=0;
+      // Keep background mosaic out of hundreds of keyboard Tab stops.
+      tile.tabIndex=item.type==='image' && item.layer<10 ? -1 : 0;
+      tile.setAttribute('role','button');
+      if(item.type==='image')tile.setAttribute('aria-label',`Photograph ${item.number}. View original image`);
+      else tile.setAttribute('aria-pressed','false');
       tile.dataset.id=item.id;
       tile.dataset.source=item.src;
       tile._rosesItem=item;
       if(item.type==='video')tile.setAttribute('aria-label',
-        `Interview ${item.number}. ${canHover?'Hover or focus':'Tap'} to listen.`);
+        `Interview ${item.number}. ${canHover?'Hover or press Enter':'Tap'} to listen.`);
       tile.style.zIndex=String(stackOrder.indexOf(item.id)+1);
       if(item.type==='image') {
         const image=document.createElement('img');
         image.className='original-image';
-        image.loading='eager';image.decoding='async';image.draggable=false;image.alt='';
-        if(item.x<innerWidth*1.1)image.fetchPriority='high';
+        image.loading=item.stripIndex===0?'eager':'lazy';
+        image.decoding='async';image.draggable=false;image.alt='';
+        if(item.stripIndex===0 && item.x<innerWidth*.9 && item.layer>=10)
+          image.fetchPriority='high';
         image.src=item.src;
         image.onload=()=>{
           loadedImages++;
@@ -1149,10 +1233,15 @@
         });
       } else {
         const video=document.createElement('video');
-        video.src=item.src;video.muted=true;video.defaultMuted=true;video.loop=true;
-        video.playsInline=true;video.setAttribute('playsinline','');video.preload='metadata';
+        video.dataset.src=item.src;
+        video.muted=true;video.defaultMuted=true;video.loop=true;
+        video.playsInline=true;video.setAttribute('playsinline','');video.preload='none';
         video.setAttribute('aria-hidden','true');
-        // Show a still frame even before the visitor hovers to play.
+        const posterName=videoPosters[item.name]||videoPosters[item.src];
+        if(typeof posterName==='string' && posterName.trim())
+          video.poster=assetPath('posters',posterName);
+        // Show an available poster immediately; otherwise load a first frame
+        // only when this interview approaches the viewport.
         video.addEventListener('loadedmetadata',()=>{
           if(video.videoHeight)mediaRatios.set(item.src,video.videoWidth/video.videoHeight);
           if(Number.isFinite(video.duration) && video.duration > .15){
@@ -1166,9 +1255,8 @@
         if(canHover){
           tile.addEventListener('pointerenter',()=>{bringTileToFront(item);startPreview(tile);});
           tile.addEventListener('pointerleave',()=>stopPreview(tile));
-          // Keyboard users can listen on focus; no interview click or modal action.
-          tile.addEventListener('focus',()=>{bringTileToFront(item);startPreview(tile);});
-          tile.addEventListener('blur',()=>stopPreview(tile));
+          // Focus alone is silent; Enter/Space activates the interview.
+          tile.addEventListener('focus',()=>bringTileToFront(item));
         } else {
           // Touchscreens have no hover. Tapping toggles playback in the tile,
           // never opens a fullscreen player.
@@ -1183,7 +1271,7 @@
       tile.addEventListener('click',()=>activateTile(item));
       if(item.type==='video'){
         tile.addEventListener('keydown',e=>{
-          if(e.key==='Enter'){
+          if(e.key==='Enter' || e.key===' '){
             e.preventDefault();e.stopPropagation();
             activateTile(item);
           }
@@ -1192,17 +1280,14 @@
       return tile;
     }
     function maybeWarn(){
-      if(brokenImages>=3 && loadedImages===0 && !custom.images){
-        assetWarning.innerHTML='이미지를 찾지 못했어요.<br><code>assets/images/Frame-1.jpeg</code> 부터 확인해 주세요.<br>파일명이 다르면 <code>assets/manifest.js</code> 에 실제 파일명을 지정하면 됩니다.';
-        assetWarning.hidden=false;
-      }
+      if(!hasUsablePhotos())showNoPhotoWarning();
     }
     function tick(t) {
       const frameMs=previousTime?Math.max(0,Math.min(100,t-previousTime)):16.67;
       const dt=Math.min(3,frameMs/16.67)||1;previousTime=t;
       // The camera always advances between interactions. Hover, clicks and
       // wheel movement never introduce a dead stop; dragging temporarily owns it.
-      if(entered && t>=autoScrollResumeAt &&
+      if(entered && !motionPreference.matches && t>=autoScrollResumeAt &&
          !pressed?.drag && heldArrows.size===0 && !document.hidden){
         move(AUTO_SCROLL_PX_PER_SECOND*frameMs/1000);
       }
@@ -1212,21 +1297,26 @@
         const direction=(heldArrows.has('ArrowRight')?1:0)-(heldArrows.has('ArrowLeft')?1:0);
         if(direction)move(direction*12*dt);
       }
-      if(entered)placeVisible();
+      // Only move the compositor layer each frame; never remeasure every tile.
+      stage.style.transform=`translate3d(${-camera}px,0,0)`;
+      if(entered && (Number.isNaN(lastPlacementCamera) ||
+         Math.abs(camera-lastPlacementCamera)>Math.min(170,innerWidth*.12)))placeVisible();
       // Audio ducking: ~0.6s fade-down / ~0.9s recovery, with no abrupt cuts.
       // Frame-rate independent smoothing follows a new hover target immediately.
       const elapsedMs=Math.min(80, Math.max(0,(t-(audioLastTime||t))));
       audioLastTime=t;
-      const fadeMs=backgroundVolumeTarget<soundtrack.volume?250:380;
-      const f=1-Math.exp(-elapsedMs/fadeMs);
-      soundtrack.volume += (backgroundVolumeTarget-soundtrack.volume)*f;
-      if(Math.abs(soundtrack.volume-backgroundVolumeTarget)<.002)
-        soundtrack.volume=backgroundVolumeTarget;
+      if(!iOSAudio){
+        const fadeMs=backgroundVolumeTarget<soundtrack.volume?250:380;
+        const f=1-Math.exp(-elapsedMs/fadeMs);
+        soundtrack.volume += (backgroundVolumeTarget-soundtrack.volume)*f;
+        if(Math.abs(soundtrack.volume-backgroundVolumeTarget)<.002)
+          soundtrack.volume=backgroundVolumeTarget;
+      }
       if(activePreview){
         const video=activePreview.querySelector('video');
         if(video){
           const vf=1-Math.exp(-elapsedMs/170);
-          video.volume=Math.min(INTERVIEW_VOLUME,video.volume+(INTERVIEW_VOLUME-video.volume)*vf);
+          if(!iOSAudio)video.volume=Math.min(INTERVIEW_VOLUME,video.volume+(INTERVIEW_VOLUME-video.volume)*vf);
         }
       }
       requestAnimationFrame(tick);
@@ -1302,34 +1392,42 @@
     function startPreview(tile){
       if(!entered||pressed?.drag||activePreview===tile)return;
       // Audio can follow the pointer without stopping the moving collage.
+      // Preserve whether music was playing when moving directly between interviews.
+      // On iOS it is paused for the first video, so checking soundtrack.paused
+      // again would incorrectly lose the resume state.
+      const shouldResumeMusic=activePreview ? resumeMusicAfterPreview : !soundtrack.paused;
       if(activePreview)stopPreview(activePreview,false);
       const video=tile.querySelector('video');if(!video)return;
+      ensureVideoSource(video,true);
       activePreview=tile;
-      resumeMusicAfterPreview=!soundtrack.paused;
+      resumeMusicAfterPreview=shouldResumeMusic;
       backgroundVolumeTarget=DUCKED_VOLUME;
+      if(iOSAudio && resumeMusicAfterPreview)soundtrack.pause();
       video.muted=false;
-      video.volume=0;
+      if(!iOSAudio)video.volume=0;
       try { video.currentTime=0; } catch {}
       const playAttempt=video.play();
       if(playAttempt && typeof playAttempt.then==='function') {
         playAttempt.then(()=>{
-          if(activePreview===tile)tile.classList.add('is-playing');
+          if(activePreview===tile){tile.classList.add('is-playing');tile.setAttribute('aria-pressed','true');}
           else video.pause();
         }).catch(err=>{
           console.info('Interview sound was blocked by browser autoplay policy:',err);
           if(activePreview===tile)stopPreview(tile);
         });
-      } else tile.classList.add('is-playing');
+      } else {tile.classList.add('is-playing');tile.setAttribute('aria-pressed','true');}
     }
     function stopPreview(tile=null,restoreMusic=true){
       if(!activePreview || (tile&&tile!==activePreview))return;
       const previous=activePreview;activePreview=null;
       const video=previous.querySelector('video');
-      if(video){video.pause();video.muted=true;try{video.currentTime=0}catch{}}
+      if(video){video.pause();video.muted=true}
       previous.classList.remove('is-playing');
-      // Music was never paused by hover, so simply fade its volume back up.
+      previous.setAttribute('aria-pressed','false');
       if(restoreMusic){
         backgroundVolumeTarget=MUSIC_VOLUME;
+        if(iOSAudio && resumeMusicAfterPreview && entered)
+          soundtrack.play().catch(()=>{});
         resumeMusicAfterPreview=false;
       }
     }
@@ -1341,7 +1439,9 @@
         e.preventDefault();enterExperience();return;
       }
       if(!entered||e.altKey||e.ctrlKey||e.metaKey)return;
-      if(e.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||''))return;
+      if(e.target?.isContentEditable ||
+         e.target?.closest?.('button,a,[role="button"],[role="link"],[role="dialog"]') ||
+         /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||''))return;
       if(e.key==='ArrowRight' || e.key==='ArrowLeft')
         autoScrollResumeAt=0;
       // Space toggles the Roses soundtrack throughout the collage.
@@ -1390,7 +1490,14 @@
       try {
         if(rhizoma && typeof rhizoma.release==='function'){
           rhizoma.stop?.();
-          await rhizoma.release({seconds:.24});
+          // External engines must never be able to trap visitors on the intro.
+          let timeoutId;
+          try{
+            await Promise.race([
+              Promise.resolve(rhizoma.release({seconds:.24})),
+              new Promise(resolve=>{timeoutId=setTimeout(resolve,1400);})
+            ]);
+          }finally{clearTimeout(timeoutId);}
         }
       } catch(err) {
         console.warn('Rhizoma release could not finish; entering collage:',err);
@@ -1415,11 +1522,16 @@
       },370);
     }
     enter.addEventListener('click',enterExperience);
-    let pendingResize;
+    let pendingResize,layoutWidth=innerWidth,layoutHeight=innerHeight;
     addEventListener('resize',()=>{
       clearTimeout(pendingResize);pendingResize=setTimeout(()=>{
-        layout();
-      },120);
+        const widthChanged=innerWidth!==layoutWidth;
+        const substantialHeightChange=Math.abs(innerHeight-layoutHeight)>90;
+        // Ignore minor mobile browser toolbar height shifts.
+        if(widthChanged || substantialHeightChange){
+          layoutWidth=innerWidth;layoutHeight=innerHeight;layout();
+        }
+      },180);
     });
     layout();requestAnimationFrame(tick);
   })();
