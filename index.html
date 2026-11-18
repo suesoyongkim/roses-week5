@@ -320,7 +320,9 @@
 
     @media (max-width:760px) {
       .entry-title { font-size:clamp(34px,9.6vw,62px) }
-      .instructions { font-size:9px;max-width:56% }
+      /* The swipe hint sits ABOVE the contacts row, not behind the icons. */
+      .instructions { font-size:9px;max-width:100%;
+        bottom:calc(70px + env(safe-area-inset-bottom,0px)); }
       .social-links { gap:7px;bottom:calc(clamp(18px,3vw,40px) - 11px) }
       .social-link { width:36px;height:34px }
       .more-button { min-width:0;height:34px;padding:0;font-size:10px }
@@ -411,6 +413,9 @@
     const entry = get('entry'), title = get('rosesTitle'), enter = get('enter');
     const introShell=get('introShell');
     const experience = get('experience'), viewport = get('viewport'), stage = get('stage');
+    viewport.setAttribute('aria-label',innerWidth<=760
+      ? 'Infinite vertical photo collage. Swipe up or down to explore.'
+      : 'Infinite horizontal photo collage. Scroll, drag, or use arrow keys to explore.');
     const soundtrack = get('soundtrack');
     const assetWarning = get('assetWarning');
     const moreButton=get('moreButton'),creditsOverlay=get('creditsOverlay');
@@ -491,6 +496,7 @@
     if(!canHover){
       document.querySelector('.desktop-instructions').hidden=true;
       document.querySelector('.touch-instructions').hidden=false;
+      if(innerWidth<=760)document.querySelector('.touch-instructions').textContent='SWIPE ↑ ↓ TO EXPLORE';
     }
     // Use the white circle alone, precisely centered on the actual pointer.
     // ROSES intro is cursor-free (including its release transition).
@@ -732,7 +738,100 @@
       }
       return winner;
     }
+    // Mobile uses its own upright, full-width vertical mosaic. Desktop keeps
+    // the existing horizontal strips and every photo keeps its native rotation.
+    const mobileVertical=()=>innerWidth<=760;
+    function buildVerticalStrip(index){
+      const vW=innerWidth, vH=innerHeight;
+      const stripSeed=seedForStrip(index);
+      const available=media.filter(item=>!missingSources.has(item.src));
+      const arranged=index===0?available:shuffleStable(available,stripSeed);
+      const allPhotos=arranged.filter(item=>item.type==='image');
+      const allVideos=arranged.filter(item=>item.type==='video');
+      const background=allPhotos.slice(0,Math.min(96,Math.round(allPhotos.length*.8)));
+      const foreground=shuffleStable([...allPhotos.slice(background.length),...allVideos],
+        stripSeed^0xB84FA921);
+      const next=[];
+      let verticalY=0,photoIndex=0,blockIndex=0;
+      // Shorter photo groups keep each image readable on a narrow phone. Each
+      // group spans the screen width, and the groups stack vertically.
+      while(photoIndex<background.length){
+        const remaining=background.length-photoIndex;
+        let count=Math.min(remaining,3+Math.floor(randomFor(
+          blockIndex+index*1019,381)*4));
+        if(remaining-count===1)count=remaining;
+        const group=background.slice(photoIndex,photoIndex+count);
+        const salt=blockIndex+index*1019;
+        let winner=null;
+        for(let attempt=0;attempt<12;attempt++){
+          const tree=createFreeformTree(group,salt*109+attempt*17+1);
+          const height=vW/tree.ratio;
+          const cells=[];
+          layOutFreeformTree(tree,0,0,vW,height,cells,index);
+          const desiredHeight=vW*(.65+randomFor(salt,409)*.54);
+          let penalty=Math.abs(Math.log(Math.max(1,height)/desiredHeight))*2;
+          for(const cell of cells){
+            const smallest=Math.min(cell.width,cell.height);
+            penalty+=Math.max(0,72-smallest)/72;
+          }
+          if(!winner||penalty<winner.penalty)winner={penalty,height,cells};
+        }
+        for(let k=0;k<winner.cells.length;k++){
+          const cell=winner.cells[k];
+          const tileSeed=index*7919+photoIndex+k*173;
+          const scale=1.055+Math.pow(randomFor(tileSeed,501),.85)*.12;
+          const width=cell.width*scale,height=cell.height*scale;
+          const overX=(width-cell.width)/2,overY=(height-cell.height)/2;
+          const jitterX=(randomFor(tileSeed,502)*2-1)*overX*.7;
+          const jitterY=(randomFor(tileSeed,503)*2-1)*overY*.7;
+          next.push({...cell,x:cell.x-overX+jitterX,
+            y:cell.y+verticalY+jitterY,width,height,
+            layer:1+Math.floor(randomFor(tileSeed,504)*2)});
+        }
+        verticalY+=winner.height;
+        photoIndex+=count;
+        blockIndex++;
+      }
+      background.forEach(item=>ensureBackgroundRatio(item.src));
+      const span=Math.max(vH,verticalY);
+      // Keep a few foreground photos and interviews floating above the mosaic.
+      const gaps=foreground.map((item,i)=>.35+Math.pow(randomFor(i+index*1019,201),1.5)*1.7);
+      const gapTotal=gaps.reduce((a,b)=>a+b,0)||1;
+      let travelled=0;
+      foreground.forEach((item,i)=>{
+        const salt=i+index*1019;
+        const middleY=(travelled+gaps[i]*.5)/gapTotal*span;
+        travelled+=gaps[i];
+        const naturalRatio=Math.max(.45,Math.min(2.8,mediaRatios.get(item.src)||1.25));
+        const maxWidth=Math.min(vW*(item.type==='video'?.62:.52),
+          (item.type==='video'?170:100)+randomFor(salt,203)*(item.type==='video'?50:85));
+        const width=Math.min(maxWidth,vH*.38*naturalRatio);
+        const height=width/naturalRatio;
+        const x=Math.max(0,Math.min(vW-width,(vW-width)*randomFor(salt,511)));
+        const y=Math.max(height/2,Math.min(span-height/2,
+          middleY+(randomFor(salt,207)-.5)*Math.min(115,span*.018)));
+        next.push({...item,id:`${index}:${item.id}`,stripIndex:index,
+          x,width,height,y,layer:item.type==='video'
+            ?25+Math.floor(randomFor(salt,213)*5)
+            :10+Math.floor(randomFor(salt,213)*10)});
+      });
+      // One occasional larger photo in the mobile flow, sized to fit the phone.
+      if(background.length>1 && index%3===0){
+        const pick=background[Math.floor(randomFor(index,914)*background.length)];
+        const ratio=Math.max(.5,Math.min(2.7,mediaRatios.get(pick.src)||1.25));
+        const width=Math.min(vW*.8,Math.min(vW*.68*ratio,vH*.46*ratio));
+        const height=width/ratio;
+        const y=Math.max(height/2,Math.min(span-height/2,
+          index===0?vH*.48:span*(.24+randomFor(index,916)*.52)));
+        const x=Math.max(0,Math.min(vW-width,(vW-width)*(.1+randomFor(index,917)*.8)));
+        // A separate copy gets a unique tile identity but uses the same source.
+        next.push({...pick,id:`${index}:feature:${pick.id}`,stripIndex:index,
+          x,width,height,y,layer:3});
+      }
+      return {index,start:0,width:span,items:next};
+    }
     function buildStrip(index){
+      if(mobileVertical())return buildVerticalStrip(index);
       const vW=innerWidth, vH=innerHeight;
       const isMobile=vW<=760;
       const stripSeed=seedForStrip(index);
@@ -881,7 +980,7 @@
       }
       // Retain each strip's start/width for stable reverse scrolling, but discard
       // far-off tile geometry to keep memory bounded during long explorations.
-      const keepDistance=Math.max(innerWidth*3,1800);
+      const keepDistance=Math.max((mobileVertical()?innerHeight:innerWidth)*3,1800);
       for(const strip of strips.values()){
         if(strip.start+strip.width<from-keepDistance || strip.start>to+keepDistance)
           strip.items=null;
@@ -940,11 +1039,13 @@
     const preloadedFirstScreen=new Set();
     function preloadFirstScreen() {
       const candidates=[];
+      const vertical=mobileVertical(),viewSpan=vertical?innerHeight:innerWidth;
       for(const strip of strips.values()){
-        if(strip.start>innerWidth*1.12 || strip.start+strip.width<0)continue;
+        if(strip.start>viewSpan*1.12 || strip.start+strip.width<0)continue;
         for(const item of strip.items||[]){
-          if(item.type==='image' && strip.start+item.x<innerWidth*1.12 &&
-             strip.start+item.x+item.width>=0)candidates.push(item);
+          const start=strip.start+(vertical?item.y-item.height/2:item.x);
+          const end=start+(vertical?item.height:item.width);
+          if(item.type==='image' && start<viewSpan*1.12 && end>=0)candidates.push(item);
         }
       }
       for(const item of candidates.slice(0,28)) {
@@ -964,24 +1065,22 @@
     function placeVisible() {
       lastPlacementCamera=camera;
       if(!hasUsablePhotos()){showNoPhotoWarning();return;}
-      // No modulo/wrap: new seeded mosaics are created beyond both ends.
-      // Each strip is stable when returning to an earlier section.
-      const buffer=Math.min(520,innerWidth*.46);
-      ensureStrips(camera-buffer,camera+innerWidth+buffer);
+      const vertical=mobileVertical(),viewSpan=vertical?innerHeight:innerWidth;
+      const buffer=Math.min(520,viewSpan*.46);
+      ensureStrips(camera-buffer,camera+viewSpan+buffer);
       const keep=new Set(),nearby=[];
       for(const strip of strips.values()){
         if(strip.start+strip.width<camera-buffer ||
-           strip.start>camera+innerWidth+buffer)continue;
+           strip.start>camera+viewSpan+buffer)continue;
         if(!strip.items)strip.items=buildStrip(strip.index).items;
         for(const item of strip.items){
           if(missingSources.has(item.src))continue;
-          const worldLeft=strip.start+item.x;
-          const viewLeft=worldLeft-camera;
-          if(viewLeft+item.width< -buffer || viewLeft>innerWidth+buffer)continue;
-          nearby.push({item,left:worldLeft});
+          const start=strip.start+(vertical?item.y-item.height/2:item.x);
+          const end=start+(vertical?item.height:item.width);
+          if(end<camera-buffer || start>camera+viewSpan+buffer)continue;
+          nearby.push({item,offset:strip.start});
         }
       }
-      // New segments join the common stacking order without disrupting clicks.
       const nearbyByLayer=nearby.map(({item},i)=>({...item,paintIndex:i}))
         .sort((a,b)=>a.layer-b.layer || a.paintIndex-b.paintIndex).map(item=>item.id);
       const availableIds=new Set(nearbyByLayer);
@@ -989,7 +1088,7 @@
       stackOrder=[...nearbyByLayer.filter(id=>!previouslyStacked.has(id)),
                   ...stackOrder.filter(id=>availableIds.has(id))];
       const zOrder=new Map(stackOrder.map((id,index)=>[id,index+1]));
-      for(const {item,left} of nearby){
+      for(const {item,offset} of nearby){
         keep.add(item.id);
         let el=visible.get(item.id);
         if(!el){el=makeTile(item);visible.set(item.id,el);stage.appendChild(el);}
@@ -997,30 +1096,30 @@
         const ratio=mediaRatios.get(item.src);
         if(ratio>0 && item.type==='image'){
           if(item.layer>2){
-            // Foreground photo fits inside its slot without cropping.
             if(displayWidth/displayHeight>ratio)displayWidth=displayHeight*ratio;
             else displayHeight=displayWidth/ratio;
           }
-          // Mosaic backgrounds are already packed to intrinsic ratios.
         } else if(ratio>0 && item.type==='video'){
           if(displayWidth/displayHeight<ratio)displayWidth=displayHeight*ratio;
           else displayHeight=displayWidth/ratio;
         }
-        let centerY=item.y;
-        if(item.type==='image'){
+        let centerY=item.y+(vertical?offset:0);
+        if(item.type==='image' && !vertical){
           const halfHeight=displayHeight/2;
           centerY=Math.max(halfHeight,Math.min(innerHeight-halfHeight,centerY));
         }
-        el.style.left=(left+(item.width-displayWidth)/2)+'px';
+        let left=(vertical?item.x:offset+item.x)+(item.width-displayWidth)/2;
+        // Photos in the mobile feed stay within the phone's horizontal bounds.
+        if(vertical && item.type==='image' && item.layer>=10)
+          left=Math.max(0,Math.min(innerWidth-displayWidth,left));
+        el.style.left=left+'px';
         el.style.top=centerY+'px';
         el.style.width=displayWidth+'px';
         el.style.height=displayHeight+'px';
         el.style.zIndex=String(zOrder.get(item.id)||1);
-        el._rosesBounds={left:left+(item.width-displayWidth)/2,
-          right:left+(item.width-displayWidth)/2+displayWidth,
+        el._rosesBounds={left,right:left+displayWidth,
           top:centerY-displayHeight/2,bottom:centerY+displayHeight/2};
         if(item.type==='image'){
-          // Keep the same original two-second deadline across layout rebuilds.
           const burst=photoFilterStates.get(item.id);
           const activeBurst=Boolean(burst && performance.now()<burst.expiresAt);
           if(activeBurst)ensurePhotoFilterLayer(el);
@@ -1037,13 +1136,8 @@
         if(keep.has(id))continue;
         if(el===activePreview)stopPreview();
         if(el===document.activeElement)viewport.focus({preventScroll:true});
-        // Filter state belongs to the photo ID, not to the transient DOM node.
-        // Removing an offscreen tile must never restart its countdown.
         el.remove();visible.delete(id);
       }
-      // Video bytes are not requested for all 13 interviews (and their copies)
-      // at once. Warm only a few tiles around the current viewport. If a
-      // poster exists it appears immediately, independently of MP4 loading.
       warmVisibleVideos();
     }
     function ensureVideoSource(video,forPlayback=false){
@@ -1056,16 +1150,19 @@
       }
     }
     function warmVisibleVideos(){
-      const margin=Math.min(260,innerWidth*.25);
+      const vertical=mobileVertical(),viewSpan=vertical?innerHeight:innerWidth;
+      const margin=Math.min(260,viewSpan*.25);
       const candidates=[];
       for(const el of visible.values()){
         if(!el.classList.contains('interview'))continue;
         const b=el._rosesBounds;
-        if(!b || b.right<camera-margin || b.left>camera+innerWidth+margin)continue;
+        if(!b || (vertical
+          ? b.bottom<camera-margin || b.top>camera+viewSpan+margin
+          : b.right<camera-margin || b.left>camera+viewSpan+margin))continue;
         const video=el.querySelector('video');
         if(!video || video.hasAttribute('src'))continue;
-        const middle=(b.left+b.right)/2;
-        const distance=Math.abs(middle-(camera+innerWidth*.5));
+        const middle=vertical?(b.top+b.bottom)/2:(b.left+b.right)/2;
+        const distance=Math.abs(middle-(camera+viewSpan*.5));
         candidates.push({video,distance});
       }
       candidates.sort((a,b)=>a.distance-b.distance);
@@ -1139,13 +1236,16 @@
     function highlightTouchPhoto(x,y){
       if(canHover||!entered||creditsOpen||photoDetailOpen)return;
       let best=null,bestD=Infinity;
-      const worldX=x+camera;
+      const vertical=mobileVertical();
+      const worldX=x+(vertical?0:camera),worldY=y+(vertical?camera:0);
       for(const el of visible.values()){
         if(!el.classList.contains('photo'))continue;
         const r=el._rosesBounds;
-        if(!r || r.right<camera || r.left>camera+innerWidth || r.bottom<0 || r.top>innerHeight)continue;
+        if(!r || (vertical
+          ? r.bottom<camera || r.top>camera+innerHeight || r.right<0 || r.left>innerWidth
+          : r.right<camera || r.left>camera+innerWidth || r.bottom<0 || r.top>innerHeight))continue;
         const dx=Math.max(r.left-worldX,0,worldX-r.right);
-        const dy=Math.max(r.top-y,0,y-r.bottom);
+        const dy=Math.max(r.top-worldY,0,worldY-r.bottom);
         const d=dx*dx+dy*dy;
         if(d<bestD){best=el;bestD=d;}
       }
@@ -1195,7 +1295,8 @@
         image.className='original-image';
         image.loading=item.stripIndex===0?'eager':'lazy';
         image.decoding='async';image.draggable=false;image.alt='';
-        if(item.stripIndex===0 && item.x<innerWidth*.9 && item.layer>=10)
+        if(item.stripIndex===0 &&
+           (mobileVertical()?item.y<innerHeight*1.1:item.x<innerWidth*.9) && item.layer>=10)
           image.fetchPriority='high';
         image.src=item.src;
         image.onload=()=>{
@@ -1258,13 +1359,8 @@
           // Focus alone is silent; Enter/Space activates the interview.
           tile.addEventListener('focus',()=>bringTileToFront(item));
         } else {
-          // Touchscreens have no hover. Tapping toggles playback in the tile,
-          // never opens a fullscreen player.
-          tile.addEventListener('pointerup',()=>{
-            if(pressed?.drag || performance.now()-draggedRecently<330)return;
-            if(activePreview===tile)stopPreview(tile);
-            else startPreview(tile);
-          });
+          // The shared click activation below toggles touch playback once.
+          // A second pointerup listener would double-toggle on iOS Safari.
         }
       }
       // Click shows the unfiltered original; hover alone controls front stacking.
@@ -1294,13 +1390,19 @@
       camera+=(target-camera)*(1-Math.pow(.83,dt));
       // Arrow keys move smoothly while held.
       if(entered && heldArrows.size){
-        const direction=(heldArrows.has('ArrowRight')?1:0)-(heldArrows.has('ArrowLeft')?1:0);
+        const forward=mobileVertical()?'ArrowDown':'ArrowRight';
+        const backward=mobileVertical()?'ArrowUp':'ArrowLeft';
+        const direction=(heldArrows.has(forward)?1:0)-(heldArrows.has(backward)?1:0);
         if(direction)move(direction*12*dt);
       }
-      // Only move the compositor layer each frame; never remeasure every tile.
-      stage.style.transform=`translate3d(${-camera}px,0,0)`;
+      // A single transformed stage moves horizontally on desktop and vertically
+      // on phones. Tile geometry is recalculated only when a buffer is crossed.
+      stage.style.transform=mobileVertical()
+        ? `translate3d(0,${-camera}px,0)`
+        : `translate3d(${-camera}px,0,0)`;
+      const axisSize=mobileVertical()?innerHeight:innerWidth;
       if(entered && (Number.isNaN(lastPlacementCamera) ||
-         Math.abs(camera-lastPlacementCamera)>Math.min(170,innerWidth*.12)))placeVisible();
+         Math.abs(camera-lastPlacementCamera)>Math.min(170,axisSize*.12)))placeVisible();
       // Audio ducking: ~0.6s fade-down / ~0.9s recovery, with no abrupt cuts.
       // Frame-rate independent smoothing follows a new hover target immediately.
       const elapsedMs=Math.min(80, Math.max(0,(t-(audioLastTime||t))));
@@ -1328,7 +1430,8 @@
       // Wheel input takes effect immediately, with no idle wait before the
       // forward drift. Clear leftover reverse easing when the gesture ends.
       autoScrollResumeAt=0;
-      const d=Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY;
+      const d=mobileVertical()?(Math.abs(e.deltaY)>1?e.deltaY:e.deltaX)
+        :(Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY);
       move(d*(e.deltaMode===1?25:1.05));
       clearTimeout(wheelSettleTimer);
       wheelSettleTimer=setTimeout(()=>{target=camera;wheelSettleTimer=null;},120);
@@ -1353,7 +1456,7 @@
         stopPreview(false);
       }
       if(pressed.drag){
-        pauseAutoScroll();move(Math.abs(dx)>Math.abs(dy)?-dx:-dy);
+        pauseAutoScroll();move(mobileVertical()?-dy:(Math.abs(dx)>Math.abs(dy)?-dx:-dy));
         if(e.pointerType==='touch'){
           highlightTouchPhoto(e.clientX,e.clientY);
         }
@@ -1442,7 +1545,9 @@
       if(e.target?.isContentEditable ||
          e.target?.closest?.('button,a,[role="button"],[role="link"],[role="dialog"]') ||
          /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||''))return;
-      if(e.key==='ArrowRight' || e.key==='ArrowLeft')
+      const forward=mobileVertical()?'ArrowDown':'ArrowRight';
+      const backward=mobileVertical()?'ArrowUp':'ArrowLeft';
+      if(e.key===forward || e.key===backward)
         autoScrollResumeAt=0;
       // Space toggles the Roses soundtrack throughout the collage.
       // If an interview is currently previewing, stop it first so audio never overlaps.
@@ -1454,9 +1559,9 @@
         else soundtrack.pause();
         return;
       }
-      if(e.key!=='ArrowRight'&&e.key!=='ArrowLeft')return;
+      if(e.key!==forward&&e.key!==backward)return;
       e.preventDefault();
-      if(!heldArrows.has(e.key))move(e.key==='ArrowRight'?110:-110);
+      if(!heldArrows.has(e.key))move(e.key===forward?110:-110);
       heldArrows.add(e.key);
     });
     document.addEventListener('keyup',e=>{heldArrows.delete(e.key);if(!heldArrows.size)autoScrollResumeAt=0;});
@@ -1529,7 +1634,11 @@
         const substantialHeightChange=Math.abs(innerHeight-layoutHeight)>90;
         // Ignore minor mobile browser toolbar height shifts.
         if(widthChanged || substantialHeightChange){
-          layoutWidth=innerWidth;layoutHeight=innerHeight;layout();
+          layoutWidth=innerWidth;layoutHeight=innerHeight;
+          viewport.setAttribute('aria-label',mobileVertical()
+            ? 'Infinite vertical photo collage. Swipe up or down to explore.'
+            : 'Infinite horizontal photo collage. Scroll, drag, or use arrow keys to explore.');
+          layout();
         }
       },180);
     });
